@@ -1,0 +1,1529 @@
+---
+title: "Replication & Causal Forest Extension: Hidrobo, Peterman & Heise (2016)"
+subtitle: "The Effect of Cash, Vouchers, and Food Transfers on Intimate Partner Violence"
+author: "Cedric Kopp"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+---
+
+# Part 1: Data Preparation & Replication
+
+## Load Libraries
+
+```{r setup, message=FALSE, warning=FALSE}
+library(grf)
+library(haven)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(caret)
+library(sandwich)
+library(lmtest)
+library(margins)
+library(Hmisc)
+library(tidyr)
+```
+
+## Load Data
+
+```{r load-data}
+# Data: Hidrobo et al. (2016) replication archive, Harvard Dataverse
+# https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/YBGPAP
+# Place DV_baseline_followup.dta at Data-and-dofiles/Data/ relative to this file.
+df_raw <- read_dta("Data-and-dofiles/Data/DV_baseline_followup.dta")
+dim(df_raw)
+```
+
+## Replicate Variable Construction from the Stata Do-File
+
+The original do-file constructs treatment indicators, IPV outcomes, control variables, and sample eligibility flags. We replicate this step by step.
+
+```{r construct-variables}
+df <- df_raw
+
+# --- Treatment indicators ---
+df$p_treat <- as.numeric(df$bl_p_treat == 1)
+df$Treatment <- as.numeric(df$bl_modalidad)
+
+df$treat_food    <- as.numeric(df$Treatment == 2)
+df$treat_cash    <- as.numeric(df$Treatment == 3)
+df$treat_voucher <- as.numeric(df$Treatment == 4)
+
+# --- Relationship indicator ---
+df$bl_inrelat <- as.numeric(df$bl_b06 == 2 | df$bl_b06 == 3)
+df$el_inrelat <- as.numeric(df$el_b06 == 2 | df$el_b06 == 3)
+
+# --- Province ---
+df$bl_carchi <- as.numeric(df$bl_a02 == 1)
+
+# --- Endline IPV outcomes (last 6 months) ---
+ipv_el_vars <- c("el_t10b","el_t11b","el_t12b","el_t13b","el_t14b",
+                  "el_t15b","el_t16b","el_t17b","el_t18b","el_t19b",
+                  "el_t20b","el_t21b","el_t22b","el_t23b",
+                  "el_t24b","el_t25b","el_t26b","el_t27b","el_t28b")
+
+ipv_el_life <- c("el_t10","el_t11","el_t12","el_t13","el_t14",
+                  "el_t15","el_t16","el_t17","el_t18","el_t19",
+                  "el_t20","el_t21","el_t22","el_t23",
+                  "el_t24","el_t25","el_t26","el_t27","el_t28")
+
+for (i in seq_along(ipv_el_vars)) {
+  bvar <- ipv_el_vars[i]
+  lvar <- ipv_el_life[i]
+  if (bvar %in% names(df) & lvar %in% names(df)) {
+    df[[bvar]] <- ifelse(is.na(df[[bvar]]) & df[[lvar]] == 0, 0, df[[bvar]])
+    df[[bvar]] <- as.numeric(df[[bvar]] == 1)
+  }
+}
+
+# Same for baseline
+ipv_bl_vars <- c("bl_t10b","bl_t11b","bl_t12b","bl_t13b","bl_t14b",
+                  "bl_t15b","bl_t16b","bl_t17b","bl_t18b","bl_t19b",
+                  "bl_t20b","bl_t21b","bl_t22b","bl_t23b")
+
+ipv_bl_life <- c("bl_t10","bl_t11","bl_t12","bl_t13","bl_t14",
+                  "bl_t15","bl_t16","bl_t17","bl_t18","bl_t19",
+                  "bl_t20","bl_t21","bl_t22","bl_t23")
+
+for (i in seq_along(ipv_bl_vars)) {
+  bvar <- ipv_bl_vars[i]
+  lvar <- ipv_bl_life[i]
+  if (bvar %in% names(df) & lvar %in% names(df)) {
+    df[[bvar]] <- ifelse(is.na(df[[bvar]]) & df[[lvar]] == 0, 0, df[[bvar]])
+    df[[bvar]] <- as.numeric(df[[bvar]] == 1)
+  }
+}
+
+# --- Composite IPV outcomes ---
+
+# Endline
+df$el_control   <- as.numeric(df$el_t10b == 1 | df$el_t11b == 1 | 
+                                df$el_t25b == 1 | df$el_t26b == 1)
+df$el_emotional <- as.numeric(df$el_t12b == 1 | df$el_t13b == 1 | df$el_t14b == 1 | 
+                                df$el_t24b == 1 | df$el_t27b == 1 | df$el_t28b == 1)
+df$el_physical  <- as.numeric(df$el_t15b == 1 | df$el_t16b == 1 | df$el_t17b == 1 | 
+                                df$el_t18b == 1 | df$el_t19b == 1 | df$el_t20b == 1 | 
+                                df$el_t21b == 1 | df$el_t22b == 1 | df$el_t23b == 1)
+
+# Baseline
+df$bl_control   <- as.numeric(df$bl_t10b == 1 | df$bl_t11b == 1)
+df$bl_emotional <- as.numeric(df$bl_t12b == 1 | df$bl_t13b == 1 | df$bl_t14b == 1)
+df$bl_physical  <- as.numeric(df$bl_t15b == 1 | df$bl_t16b == 1 | df$bl_t17b == 1 | 
+                                df$bl_t18b == 1 | df$bl_t19b == 1 | df$bl_t20b == 1 | 
+                                df$bl_t21b == 1 | df$bl_t22b == 1 | df$bl_t23b == 1)
+
+# Baseline lifetime violence
+df$bl_lphysical <- as.numeric(df$bl_t15 == 1 | df$bl_t16 == 1 | df$bl_t17 == 1 | 
+                                df$bl_t18 == 1 | df$bl_t19 == 1 | df$bl_t20 == 1 | 
+                                df$bl_t21 == 1)
+df$bl_lsexual   <- as.numeric(df$bl_t22 == 1 | df$bl_t23 == 1)
+df$bl_lphysex   <- as.numeric(df$bl_lphysical == 1 | df$bl_lsexual == 1)
+
+# --- Control variables ---
+df$bl_edu_sec  <- as.numeric(df$bl_b09 > 3)
+df$bl_age      <- as.numeric(df$bl_b04)
+df$bl_colom    <- as.numeric(df$bl_b08 == 2)
+df$bl_married  <- as.numeric(df$bl_b06 == 3)
+df$bl_indig    <- as.numeric(df$bl_b07 == 2)
+df$bl_black    <- as.numeric(df$bl_b07 == 3 | df$bl_b07 == 5)
+df$bl_head     <- as.numeric(df$bl_b03 == 1)
+df$bl_dempl    <- as.numeric(df$bl_d05 != 5)
+
+df$ownhouse <- as.numeric(
+  (df$bl_e12 == 1 & df$bl_b03 == 1) | (df$bl_e12 == 2 & df$bl_b03 == 2)
+)
+
+# --- Partner variables ---
+df$bl_partn_edu <- ifelse(df$bl_b03 == 2, df$bl_mhead_edu, df$bl_mspouse_edu)
+df$bl_partn_sedu <- as.numeric(df$bl_partn_edu >= 4 & df$bl_partn_edu < 9)
+df$bl_partn_age <- ifelse(df$bl_b03 == 2, df$bl_mhead_age, df$bl_mspouse_age)
+
+# --- Household controls ---
+df$bl_nchildren0t5  <- as.numeric(df$bl_nchildren0t5)
+df$bl_nchildren6t14 <- as.numeric(df$bl_nchildren6t14)
+
+df$bl_asset_cat <- as.numeric(cut(df$bl_asset_index, 
+                                   breaks = quantile(df$bl_asset_index, probs = 0:4/4, na.rm = TRUE),
+                                   include.lowest = TRUE, labels = 1:4))
+df$wealth2 <- as.numeric(df$bl_asset_cat == 2)
+df$wealth3 <- as.numeric(df$bl_asset_cat == 3)
+df$wealth4 <- as.numeric(df$bl_asset_cat == 4)
+
+df$norooms <- as.numeric(df$bl_e06 == 0)
+
+# --- Consumption ---
+df$bl_totcons_pc <- as.numeric(df$bl_fneh_totcons_pc) * (365/12)
+df$bl_nfcons_pc  <- as.numeric(df$bl_nfcons_pc) * (365/12)
+
+# --- Eligibility & analysis sample ---
+df$eligible <- as.numeric(
+  df$bl_inrelat == 1 & 
+  as.numeric(df$bl_b04) < 70 & 
+  df$bl_tnohaymujer == 1 & 
+  (df$bl_b03 == 1 | df$bl_b03 == 2)
+)
+
+df$foranalysis <- as.numeric(
+  df$bl_tb == 1 & df$el_tb == 1 & df$diffid == 0 & df$eligible == 1
+)
+
+cat("Full dataset:", nrow(df), "observations\n")
+cat("Analysis sample (foranalysis == 1):", sum(df$foranalysis == 1, na.rm = TRUE), "observations\n")
+```
+
+## Restrict to Analysis Sample
+
+```{r analysis-sample}
+dfa <- df %>% filter(foranalysis == 1)
+cat("Analysis sample:", nrow(dfa), "observations\n")
+```
+
+---
+
+# Part 2: Replication of Main Results
+
+## Table 1: Balance Test (Pooled Treatment vs Control)
+
+```{r balance-test}
+balance_vars <- c("bl_head", "bl_colom", "bl_age", "bl_edu_sec", "bl_married",
+                   "bl_indig", "bl_black", "bl_dempl", "ownhouse",
+                   "bl_partn_sedu", "bl_partn_age",
+                   "bl_nchildren0t5", "bl_nchildren6t14", "bl_totcons_pc", "norooms",
+                   "bl_lphysex", "bl_control", "bl_emotional", "bl_physical", "bl_asset_index", "bl_carchi")
+
+balance_results <- data.frame(
+  Variable = balance_vars,
+  Mean_Control = NA, Mean_Treatment = NA, P_value = NA
+)
+
+for (i in seq_along(balance_vars)) {
+  v <- balance_vars[i]
+  if (v %in% names(dfa)) {
+    ctrl <- dfa[[v]][dfa$p_treat == 0]
+    trt  <- dfa[[v]][dfa$p_treat == 1]
+    balance_results$Mean_Control[i]   <- round(mean(ctrl, na.rm = TRUE), 3)
+    balance_results$Mean_Treatment[i] <- round(mean(trt, na.rm = TRUE), 3)
+    tt <- try(t.test(ctrl, trt), silent = TRUE)
+    if (!inherits(tt, "try-error")) {
+      balance_results$P_value[i] <- round(tt$p.value, 3)
+    }
+  }
+}
+
+print(balance_results)
+```
+
+## Table 2: Impact of Pooled Treatment on IPV (LPM)
+
+We replicate the probit regressions from Table 2 using LPM (linear probability models) as in the robustness appendix, since marginal effects from probit in R give equivalent results.
+
+```{r table2-replication}
+controls_formula <- "bl_head + bl_colom + bl_married + bl_indig + bl_black + 
+                      bl_age + bl_edu_sec + bl_dempl + ownhouse + 
+                      bl_partn_sedu + bl_partn_age + 
+                      bl_nchildren0t5 + bl_nchildren6t14 + 
+                      wealth2 + wealth3 + wealth4 + bl_carchi"
+
+outcomes <- c("el_control", "el_emotional", "el_physical")
+bl_outcomes <- c("bl_control", "bl_emotional", "bl_physical")
+
+cat("=== Table 2: Impact of Pooled Treatment on IPV (LPM) ===\n\n")
+
+for (i in 1:3) {
+  outcome <- outcomes[i]
+  bl_outcome <- bl_outcomes[i]
+  
+  cat("--- Outcome:", outcome, "---\n")
+  
+  ctrl_mean <- mean(dfa[[outcome]][dfa$p_treat == 0], na.rm = TRUE)
+  cat("Endline control mean:", round(ctrl_mean, 3), "\n")
+  
+  f1 <- as.formula(paste(outcome, "~ p_treat"))
+  m1 <- lm(f1, data = dfa)
+  
+  f2 <- as.formula(paste(outcome, "~ p_treat +", bl_outcome, "+ bl_carchi"))
+  m2 <- lm(f2, data = dfa)
+  
+  f3 <- as.formula(paste(outcome, "~ p_treat +", bl_outcome, "+", controls_formula))
+  m3 <- lm(f3, data = dfa)
+  
+  se1 <- sqrt(diag(vcovCL(m1, cluster = dfa$bl_a05)))
+  se2 <- sqrt(diag(vcovCL(m2, cluster = dfa$bl_a05)))
+  se3 <- sqrt(diag(vcovCL(m3, cluster = dfa$bl_a05)))
+  
+  cat("  No controls:       coef =", round(coef(m1)["p_treat"], 3), 
+      " SE =", round(se1["p_treat"], 3), "\n")
+  cat("  Basic controls:    coef =", round(coef(m2)["p_treat"], 3), 
+      " SE =", round(se2["p_treat"], 3), "\n")
+  cat("  Extended controls: coef =", round(coef(m3)["p_treat"], 3), 
+      " SE =", round(se3["p_treat"], 3), "\n\n")
+}
+```
+
+---
+
+# Part 3: Two-Step Causal Forest Pipeline (Athey/Wager)
+
+## Prepare Data
+
+```{r prepare-cf-data}
+cf_vars <- c("bl_head", "bl_colom", "bl_age", "bl_edu_sec", "bl_married",
+              "bl_indig", "bl_black", "bl_dempl", "ownhouse",
+              "bl_partn_sedu", "bl_partn_age",
+              "bl_nchildren0t5", "bl_nchildren6t14",
+              "bl_asset_index", "norooms", "bl_carchi",
+              "bl_physical", "bl_emotional", "bl_control")
+
+cf_data <- dfa %>%
+  select(all_of(c("el_physical", "el_emotional", "el_control", 
+                    "p_treat", "bl_a05", cf_vars))) %>%
+  na.omit()
+
+# Policy-relevant covariates: exclude cross-outcome baseline IPV variables
+# (e.g., baseline emotional/controlling abuse is not actionable for targeting physical violence)
+cf_vars_policy_phys <- setdiff(cf_vars, c("bl_emotional", "bl_control"))
+cf_vars_policy_ctrl <- setdiff(cf_vars, c("bl_physical", "bl_emotional"))
+cf_vars_policy_emot <- setdiff(cf_vars, c("bl_physical", "bl_control"))
+
+# Purely observable covariates: exclude ALL baseline IPV variables
+# (policymakers would not have access to baseline IPV survey responses)
+cf_vars_policy_obs <- setdiff(cf_vars, c("bl_physical", "bl_emotional", "bl_control"))
+
+cat("Observations for causal forest:", nrow(cf_data), "\n")
+cat("Spec A covariates:", length(cf_vars), "\n")
+cat("Spec C covariates (purely observable):", length(cf_vars_policy_obs), "\n")
+```
+
+## Correlation Plot
+
+```{r cf-correlation, fig.width=10, fig.height=10}
+corrplot(cor(cf_data %>% select(all_of(cf_vars)), use = "complete.obs"), 
+         type = "upper", tl.col = "black", tl.cex = 0.8)
+```
+
+## K-Fold Cross-Validation Setup
+
+With only ~1,100 observations, a classic 70/30 train/test split wastes valuable data. We use 5-fold cross-validation to generate out-of-fold CATE predictions while maximizing the training set size in each fold. The full data is used for point estimation (ATE, BLP, calibration), while k-fold out-of-fold predictions are used for evaluation (CATE distribution, quartile analysis).
+
+```{r cv-setup}
+K <- 5
+set.seed(1234)
+folds <- createFolds(cf_data$el_physical, k = K, list = TRUE)
+
+# Full data for estimation
+X      <- cf_data %>% select(all_of(cf_vars))
+Y      <- cf_data$el_physical
+W      <- cf_data$p_treat
+Y_ctrl <- cf_data$el_control
+Y_emot <- cf_data$el_emotional
+n      <- nrow(cf_data)
+
+cat("Full dataset:", n, "observations\n")
+cat("K-fold CV with K =", K, "\n")
+cat("Fold sizes:", sapply(folds, length), "\n")
+```
+
+## Step 1: Propensity Forest — Randomization Check
+
+Since this is an RCT, treatment assignment should be independent of covariates. We verify this by fitting a regression forest to predict W from X. If randomization worked, no covariate should have high predictive importance, and estimated propensity scores should be approximately constant.
+
+```{r propensity-check, fig.width=8, fig.height=6}
+set.seed(100241)
+
+# Fit regression forest to predict treatment assignment
+rf_W <- regression_forest(X, W, tune.parameters = "all")
+W_hat <- predict(rf_W)$predictions
+
+# Variable importance for treatment prediction
+W_varimp <- variable_importance(rf_W)
+W_vi_df <- data.frame(variable = names(X), importance = as.numeric(W_varimp))
+W_vi_df <- W_vi_df %>% arrange(desc(importance))
+
+cat("Propensity score summary (should be ~constant around", round(mean(W), 3), "):\n")
+summary(W_hat)
+cat("\nSD of estimated propensity scores:", round(sd(W_hat), 4))
+cat("\nActual treatment share:", round(mean(W), 3), "\n")
+
+# Plot
+ggplot(W_vi_df, aes(x = reorder(variable, importance), y = importance)) +
+  geom_col(fill = "coral", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Variable Importance for Predicting Treatment Assignment",
+       subtitle = "Randomization check: importance should be uniformly low",
+       x = "", y = "Importance") +
+  theme_minimal()
+```
+
+The propensity scores should cluster tightly around the actual treatment share with low variance. The variable importance bars should be roughly flat — if any covariate strongly predicted treatment, it would raise concerns about the randomization. This check complements the balance test from Part 2.
+
+## Step 2: Outcome Regression Forests & Variable Selection
+
+We fit regression forests to predict each IPV outcome from the covariates. This serves two purposes: (1) generating outcome predictions (Y.hat) for orthogonalization in the causal forest, and (2) identifying which covariates are strong predictors of the outcome level — these are the most promising candidates for detecting heterogeneity.
+
+```{r outcome-regression-forests}
+set.seed(100241)
+
+# Outcome vectors Y_ctrl, Y_emot already defined in cv-setup (full data)
+
+# Physical/Sexual Violence
+rf_Y_phys <- regression_forest(X, Y, tune.parameters = "all")
+Y_hat_phys <- predict(rf_Y_phys)$predictions
+Y_vi_phys <- variable_importance(rf_Y_phys)
+
+# Controlling Behaviors
+rf_Y_ctrl <- regression_forest(X, Y_ctrl, tune.parameters = "all")
+Y_hat_ctrl <- predict(rf_Y_ctrl)$predictions
+Y_vi_ctrl <- variable_importance(rf_Y_ctrl)
+
+# Emotional Violence
+rf_Y_emot <- regression_forest(X, Y_emot, tune.parameters = "all")
+Y_hat_emot <- predict(rf_Y_emot)$predictions
+Y_vi_emot <- variable_importance(rf_Y_emot)
+```
+
+```{r outcome-vi-table}
+vi_outcome_df <- data.frame(
+  variable = names(X),
+  Physical = round(as.numeric(Y_vi_phys), 4),
+  Controlling = round(as.numeric(Y_vi_ctrl), 4),
+  Emotional = round(as.numeric(Y_vi_emot), 4)
+)
+vi_outcome_df <- vi_outcome_df %>% arrange(desc(Physical))
+
+knitr::kable(vi_outcome_df, caption = "Outcome Regression Forest: Variable Importance for Predicting IPV Levels")
+```
+
+
+```{r variable-selection}
+# Athey/Wager threshold: keep variables with importance > 0.2 * mean
+threshold <- 0.2
+
+selected_phys <- which(Y_vi_phys / mean(Y_vi_phys) > threshold)
+selected_ctrl <- which(Y_vi_ctrl / mean(Y_vi_ctrl) > threshold)
+selected_emot <- which(Y_vi_emot / mean(Y_vi_emot) > threshold)
+
+cat("Selected variables for Physical/Sexual Violence (", length(selected_phys), "of", ncol(X), "):\n")
+print(names(X)[selected_phys])
+
+cat("\nSelected variables for Controlling Behaviors (", length(selected_ctrl), "of", ncol(X), "):\n")
+print(names(X)[selected_ctrl])
+
+cat("\nSelected variables for Emotional Violence (", length(selected_emot), "of", ncol(X), "):\n")
+print(names(X)[selected_emot])
+```
+
+### Policy-Relevant Variable Selection (Specification B)
+
+For policy purposes, we create an alternative specification that excludes cross-outcome baseline IPV variables. When targeting a program to reduce physical violence, a policymaker would not typically know a woman's baseline emotional or controlling abuse status — these are measured through confidential surveys. Specification B uses only covariates that would plausibly be available for targeting decisions.
+
+```{r policy-variable-selection}
+# Policy-relevant covariate matrices
+X_pol_phys <- X[, cf_vars_policy_phys]
+X_pol_ctrl <- X[, cf_vars_policy_ctrl]
+X_pol_emot <- X[, cf_vars_policy_emot]
+
+# Specification C: purely observable covariates (same for all outcomes)
+X_pol_obs <- X[, cf_vars_policy_obs]
+
+# Outcome regression forests with policy-relevant covariates
+rf_Y_phys_pol <- regression_forest(X_pol_phys, Y, tune.parameters = "all")
+Y_hat_phys_pol <- predict(rf_Y_phys_pol)$predictions
+Y_vi_phys_pol <- variable_importance(rf_Y_phys_pol)
+
+rf_Y_ctrl_pol <- regression_forest(X_pol_ctrl, Y_ctrl, tune.parameters = "all")
+Y_hat_ctrl_pol <- predict(rf_Y_ctrl_pol)$predictions
+Y_vi_ctrl_pol <- variable_importance(rf_Y_ctrl_pol)
+
+rf_Y_emot_pol <- regression_forest(X_pol_emot, Y_emot, tune.parameters = "all")
+Y_hat_emot_pol <- predict(rf_Y_emot_pol)$predictions
+Y_vi_emot_pol <- variable_importance(rf_Y_emot_pol)
+
+# Variable selection for policy specification
+selected_phys_pol <- which(Y_vi_phys_pol / mean(Y_vi_phys_pol) > threshold)
+selected_ctrl_pol <- which(Y_vi_ctrl_pol / mean(Y_vi_ctrl_pol) > threshold)
+selected_emot_pol <- which(Y_vi_emot_pol / mean(Y_vi_emot_pol) > threshold)
+
+cat("=== Policy-Relevant Variable Selection (Specification B) ===")
+cat("\nPhysical/Sexual (", length(selected_phys_pol), "of", ncol(X_pol_phys), "):\n")
+print(names(X_pol_phys)[selected_phys_pol])
+cat("\nControlling (", length(selected_ctrl_pol), "of", ncol(X_pol_ctrl), "):\n")
+print(names(X_pol_ctrl)[selected_ctrl_pol])
+cat("\nEmotional (", length(selected_emot_pol), "of", ncol(X_pol_emot), "):\n")
+print(names(X_pol_emot)[selected_emot_pol])
+```
+
+### Purely Observable Variable Selection (Specification C)
+
+Specification C excludes **all** baseline IPV variables (physical, emotional, controlling). This represents a targeting scenario where policymakers only have access to observable demographic and socioeconomic characteristics — no confidential IPV survey data at all.
+
+```{r obs-variable-selection}
+# Outcome regression forests with purely observable covariates
+rf_Y_phys_obs <- regression_forest(X_pol_obs, Y, tune.parameters = "all")
+Y_hat_phys_obs <- predict(rf_Y_phys_obs)$predictions
+Y_vi_phys_obs <- variable_importance(rf_Y_phys_obs)
+
+rf_Y_ctrl_obs <- regression_forest(X_pol_obs, Y_ctrl, tune.parameters = "all")
+Y_hat_ctrl_obs <- predict(rf_Y_ctrl_obs)$predictions
+Y_vi_ctrl_obs <- variable_importance(rf_Y_ctrl_obs)
+
+rf_Y_emot_obs <- regression_forest(X_pol_obs, Y_emot, tune.parameters = "all")
+Y_hat_emot_obs <- predict(rf_Y_emot_obs)$predictions
+Y_vi_emot_obs <- variable_importance(rf_Y_emot_obs)
+
+# Variable selection for purely observable specification
+selected_phys_obs <- which(Y_vi_phys_obs / mean(Y_vi_phys_obs) > threshold)
+selected_ctrl_obs <- which(Y_vi_ctrl_obs / mean(Y_vi_ctrl_obs) > threshold)
+selected_emot_obs <- which(Y_vi_emot_obs / mean(Y_vi_emot_obs) > threshold)
+
+cat("=== Purely Observable Variable Selection (Specification C) ===")
+cat("\nPhysical/Sexual (", length(selected_phys_obs), "of", ncol(X_pol_obs), "):\n")
+print(names(X_pol_obs)[selected_phys_obs])
+cat("\nControlling (", length(selected_ctrl_obs), "of", ncol(X_pol_obs), "):\n")
+print(names(X_pol_obs)[selected_ctrl_obs])
+cat("\nEmotional (", length(selected_emot_obs), "of", ncol(X_pol_obs), "):\n")
+print(names(X_pol_obs)[selected_emot_obs])
+```
+
+```{r outcome-vi-plot, fig.width=10, fig.height=7}
+vi_long <- vi_outcome_df %>%
+  pivot_longer(cols = c(Physical, Controlling, Emotional),
+               names_to = "Outcome", values_to = "Importance")
+
+ggplot(vi_long, aes(x = reorder(variable, Importance), y = Importance, fill = Outcome)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Outcome Regression Forest: Variable Importance Across IPV Outcomes",
+       subtitle = "Variables above the selection threshold are retained for the causal forest",
+       x = "", y = "Importance") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2")
+```
+```{r outcome-vi-plot-policy, fig.width=10, fig.height=7}
+
+vi_phys_pol <- data.frame(
+  variable = names(X_pol_phys),
+  Importance = as.numeric(Y_vi_phys_pol),
+  Outcome = "Physical"
+)
+
+vi_ctrl_pol <- data.frame(
+  variable = names(X_pol_ctrl),
+  Importance = as.numeric(Y_vi_ctrl_pol),
+  Outcome = "Controlling"
+)
+
+vi_emot_pol <- data.frame(
+  variable = names(X_pol_emot),
+  Importance = as.numeric(Y_vi_emot_pol),
+  Outcome = "Emotional"
+)
+
+vi_long_pol <- bind_rows(vi_phys_pol, vi_ctrl_pol, vi_emot_pol)
+
+# Plot
+ggplot(vi_long_pol,
+       aes(x = reorder(variable, Importance), y = Importance, fill = Outcome)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Outcome Regression Forest: Variable Importance Across IPV Outcomes",
+       subtitle = "Policy-Relevant Covariates (Specification B)",
+       x = "", y = "Importance") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2")
+```
+
+```{r outcome-vi-table-obs}
+vi_outcome_df_obs <- data.frame(
+  variable = names(X_pol_obs),
+  Physical = round(as.numeric(Y_vi_phys_obs), 4),
+  Controlling = round(as.numeric(Y_vi_ctrl_obs), 4),
+  Emotional = round(as.numeric(Y_vi_emot_obs), 4)
+)
+vi_outcome_df_obs <- vi_outcome_df_obs %>% arrange(desc(Physical))
+
+knitr::kable(vi_outcome_df_obs, caption = "Outcome Regression Forest: Variable Importance — Purely Observable Covariates (Specification C)")
+```
+
+```{r outcome-vi-plot-obs, fig.width=10, fig.height=7}
+vi_long_obs <- vi_outcome_df_obs %>%
+  pivot_longer(cols = c(Physical, Controlling, Emotional),
+               names_to = "Outcome", values_to = "Importance")
+
+ggplot(vi_long_obs,
+       aes(x = reorder(variable, Importance), y = Importance, fill = Outcome)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Outcome Regression Forest: Variable Importance Across IPV Outcomes",
+       subtitle = "Purely Observable Covariates (Specification C)",
+       x = "", y = "Importance") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2")
+```
+
+The variable importance from the outcome regression forests tells us which covariates are strong predictors of IPV levels. Variables that survive the selection threshold are kept in the causal forest. Note that predicting outcome *levels* well is distinct from driving *heterogeneity* in treatment effects — but following Athey & Wager, pre-selecting on outcome prediction is a principled way to reduce noise in the causal forest when the covariate space is large relative to the sample size.
+
+## Step 3: Refined Causal Forests with Orthogonalization
+
+We estimate causal forests in three specifications:
+
+- **Specification A** uses all selected covariates including cross-outcome baseline IPV variables
+- **Specification B** (policy-relevant) excludes cross-outcome baseline IPV variables that would not be available for targeting
+- **Specification C** (purely observable) excludes all baseline IPV variables entirely
+
+### Full-Data Estimation
+
+```{r refined-causal-forests}
+set.seed(100241)
+
+# --- Specification A: All selected covariates ---
+cf <- causal_forest(X[, selected_phys], Y, W,
+                    W.hat = W_hat, Y.hat = Y_hat_phys,
+                    num.trees = 4000, tune.parameters = "all",
+                    compute.oob.predictions = TRUE)
+ate_all <- average_treatment_effect(cf, target.sample = "all")
+att     <- average_treatment_effect(cf, target.sample = "treated")
+
+cf_ctrl <- causal_forest(X[, selected_ctrl], Y_ctrl, W,
+                          W.hat = W_hat, Y.hat = Y_hat_ctrl,
+                          num.trees = 4000, tune.parameters = "all",
+                          compute.oob.predictions = TRUE)
+ate_ctrl <- average_treatment_effect(cf_ctrl, target.sample = "all")
+
+cf_emot <- causal_forest(X[, selected_emot], Y_emot, W,
+                          W.hat = W_hat, Y.hat = Y_hat_emot,
+                          num.trees = 4000, tune.parameters = "all",
+                          compute.oob.predictions = TRUE)
+ate_emot <- average_treatment_effect(cf_emot, target.sample = "all")
+
+# --- Specification B: Policy-relevant covariates ---
+cf_pol <- causal_forest(X_pol_phys[, selected_phys_pol], Y, W,
+                         W.hat = W_hat, Y.hat = Y_hat_phys_pol,
+                         num.trees = 4000, tune.parameters = "all",
+                         compute.oob.predictions = TRUE)
+ate_all_pol <- average_treatment_effect(cf_pol, target.sample = "all")
+
+cf_ctrl_pol <- causal_forest(X_pol_ctrl[, selected_ctrl_pol], Y_ctrl, W,
+                              W.hat = W_hat, Y.hat = Y_hat_ctrl_pol,
+                              num.trees = 4000, tune.parameters = "all",
+                              compute.oob.predictions = TRUE)
+ate_ctrl_pol <- average_treatment_effect(cf_ctrl_pol, target.sample = "all")
+
+cf_emot_pol <- causal_forest(X_pol_emot[, selected_emot_pol], Y_emot, W,
+                              W.hat = W_hat, Y.hat = Y_hat_emot_pol,
+                              num.trees = 4000, tune.parameters = "all",
+                              compute.oob.predictions = TRUE)
+ate_emot_pol <- average_treatment_effect(cf_emot_pol, target.sample = "all")
+
+# --- Specification C: Purely observable covariates ---
+cf_phys_obs <- causal_forest(X_pol_obs[, selected_phys_obs], Y, W,
+                              W.hat = W_hat, Y.hat = Y_hat_phys_obs,
+                              num.trees = 4000, tune.parameters = "all",
+                              compute.oob.predictions = TRUE)
+ate_all_obs <- average_treatment_effect(cf_phys_obs, target.sample = "all")
+att_obs     <- average_treatment_effect(cf_phys_obs, target.sample = "treated")
+
+cf_ctrl_obs <- causal_forest(X_pol_obs[, selected_ctrl_obs], Y_ctrl, W,
+                              W.hat = W_hat, Y.hat = Y_hat_ctrl_obs,
+                              num.trees = 4000, tune.parameters = "all",
+                              compute.oob.predictions = TRUE)
+ate_ctrl_obs <- average_treatment_effect(cf_ctrl_obs, target.sample = "all")
+
+cf_emot_obs <- causal_forest(X_pol_obs[, selected_emot_obs], Y_emot, W,
+                              W.hat = W_hat, Y.hat = Y_hat_emot_obs,
+                              num.trees = 4000, tune.parameters = "all",
+                              compute.oob.predictions = TRUE)
+ate_emot_obs <- average_treatment_effect(cf_emot_obs, target.sample = "all")
+
+cat("=== Specification A (All Selected Covariates) ===\n")
+cat("Physical/Sexual:  ATE =", round(ate_all[1], 4), " SE =", round(ate_all[2], 4), "\n")
+cat("                  ATT =", round(att[1], 4), " SE =", round(att[2], 4), "\n")
+cat("Controlling:      ATE =", round(ate_ctrl[1], 4), " SE =", round(ate_ctrl[2], 4), "\n")
+cat("Emotional:        ATE =", round(ate_emot[1], 4), " SE =", round(ate_emot[2], 4), "\n")
+cat("\n=== Specification B (Policy-Relevant) ===\n")
+cat("Physical/Sexual:  ATE =", round(ate_all_pol[1], 4), " SE =", round(ate_all_pol[2], 4), "\n")
+cat("Controlling:      ATE =", round(ate_ctrl_pol[1], 4), " SE =", round(ate_ctrl_pol[2], 4), "\n")
+cat("Emotional:        ATE =", round(ate_emot_pol[1], 4), " SE =", round(ate_emot_pol[2], 4), "\n")
+cat("\n=== Specification C (Purely Observable) ===\n")
+cat("Physical/Sexual:  ATE =", round(ate_all_obs[1], 4), " SE =", round(ate_all_obs[2], 4), "\n")
+cat("                  ATT =", round(att_obs[1], 4), " SE =", round(att_obs[2], 4), "\n")
+cat("Controlling:      ATE =", round(ate_ctrl_obs[1], 4), " SE =", round(ate_ctrl_obs[2], 4), "\n")
+cat("Emotional:        ATE =", round(ate_emot_obs[1], 4), " SE =", round(ate_emot_obs[2], 4), "\n")
+```
+
+### K-Fold Cross-Validated CATE Predictions
+
+We generate out-of-fold CATE predictions using 5-fold CV. In each fold, we fit causal forests on the training folds and predict on the held-out fold, ensuring every observation has a truly out-of-sample CATE prediction for downstream evaluation.
+
+```{r kfold-cate, message=FALSE}
+set.seed(100241)
+
+oof_cate_phys <- rep(NA, n)
+oof_cate_ctrl <- rep(NA, n)
+oof_cate_emot <- rep(NA, n)
+oof_cate_phys_pol <- rep(NA, n)
+oof_cate_ctrl_pol <- rep(NA, n)
+oof_cate_emot_pol <- rep(NA, n)
+oof_cate_phys_obs <- rep(NA, n)
+oof_cate_ctrl_obs <- rep(NA, n)
+oof_cate_emot_obs <- rep(NA, n)
+
+for (k in 1:K) {
+  val_idx   <- folds[[k]]
+  train_idx <- setdiff(1:n, val_idx)
+  
+  X_tr <- X[train_idx, ]; X_va <- X[val_idx, ]
+  Y_tr <- Y[train_idx]; W_tr <- W[train_idx]
+  Y_ctrl_tr <- Y_ctrl[train_idx]; Y_emot_tr <- Y_emot[train_idx]
+  
+  # Use full-data OOB nuisance estimates (valid since OOB is cross-validated)
+  W_hat_tr      <- W_hat[train_idx]
+  Y_hat_phys_tr <- Y_hat_phys[train_idx]
+  Y_hat_ctrl_tr <- Y_hat_ctrl[train_idx]
+  Y_hat_emot_tr <- Y_hat_emot[train_idx]
+  
+  # Spec A causal forests
+  cf_k <- causal_forest(X_tr[, selected_phys], Y_tr, W_tr,
+                         W.hat = W_hat_tr, Y.hat = Y_hat_phys_tr,
+                         num.trees = 2000, tune.parameters = "all")
+  oof_cate_phys[val_idx] <- predict(cf_k, X_va[, selected_phys])$predictions
+  
+  cf_k_c <- causal_forest(X_tr[, selected_ctrl], Y_ctrl_tr, W_tr,
+                            W.hat = W_hat_tr, Y.hat = Y_hat_ctrl_tr,
+                            num.trees = 2000, tune.parameters = "all")
+  oof_cate_ctrl[val_idx] <- predict(cf_k_c, X_va[, selected_ctrl])$predictions
+  
+  cf_k_e <- causal_forest(X_tr[, selected_emot], Y_emot_tr, W_tr,
+                            W.hat = W_hat_tr, Y.hat = Y_hat_emot_tr,
+                            num.trees = 2000, tune.parameters = "all")
+  oof_cate_emot[val_idx] <- predict(cf_k_e, X_va[, selected_emot])$predictions
+  
+  # Spec B: policy-relevant
+  X_pol_phys_tr <- X_tr[, cf_vars_policy_phys]; X_pol_phys_va <- X_va[, cf_vars_policy_phys]
+  X_pol_ctrl_tr <- X_tr[, cf_vars_policy_ctrl]; X_pol_ctrl_va <- X_va[, cf_vars_policy_ctrl]
+  X_pol_emot_tr <- X_tr[, cf_vars_policy_emot]; X_pol_emot_va <- X_va[, cf_vars_policy_emot]
+  
+  Y_hat_phys_pol_tr <- Y_hat_phys_pol[train_idx]
+  Y_hat_ctrl_pol_tr <- Y_hat_ctrl_pol[train_idx]
+  Y_hat_emot_pol_tr <- Y_hat_emot_pol[train_idx]
+  
+  cf_k_pp <- causal_forest(X_pol_phys_tr[, selected_phys_pol], Y_tr, W_tr,
+                             W.hat = W_hat_tr, Y.hat = Y_hat_phys_pol_tr,
+                             num.trees = 2000, tune.parameters = "all")
+  oof_cate_phys_pol[val_idx] <- predict(cf_k_pp, X_pol_phys_va[, selected_phys_pol])$predictions
+  
+  cf_k_cp <- causal_forest(X_pol_ctrl_tr[, selected_ctrl_pol], Y_ctrl_tr, W_tr,
+                             W.hat = W_hat_tr, Y.hat = Y_hat_ctrl_pol_tr,
+                             num.trees = 2000, tune.parameters = "all")
+  oof_cate_ctrl_pol[val_idx] <- predict(cf_k_cp, X_pol_ctrl_va[, selected_ctrl_pol])$predictions
+  
+  cf_k_ep <- causal_forest(X_pol_emot_tr[, selected_emot_pol], Y_emot_tr, W_tr,
+                             W.hat = W_hat_tr, Y.hat = Y_hat_emot_pol_tr,
+                             num.trees = 2000, tune.parameters = "all")
+  oof_cate_emot_pol[val_idx] <- predict(cf_k_ep, X_pol_emot_va[, selected_emot_pol])$predictions
+  
+  # Spec C: purely observable covariates
+  X_pol_obs_tr <- X_tr[, cf_vars_policy_obs]; X_pol_obs_va <- X_va[, cf_vars_policy_obs]
+  
+  Y_hat_phys_obs_tr <- Y_hat_phys_obs[train_idx]
+  Y_hat_ctrl_obs_tr <- Y_hat_ctrl_obs[train_idx]
+  Y_hat_emot_obs_tr <- Y_hat_emot_obs[train_idx]
+  
+  cf_k_po <- causal_forest(X_pol_obs_tr[, selected_phys_obs], Y_tr, W_tr,
+                             W.hat = W_hat_tr, Y.hat = Y_hat_phys_obs_tr,
+                             num.trees = 2000, tune.parameters = "all")
+  oof_cate_phys_obs[val_idx] <- predict(cf_k_po, X_pol_obs_va[, selected_phys_obs])$predictions
+  
+  cf_k_co <- causal_forest(X_pol_obs_tr[, selected_ctrl_obs], Y_ctrl_tr, W_tr,
+                             W.hat = W_hat_tr, Y.hat = Y_hat_ctrl_obs_tr,
+                             num.trees = 2000, tune.parameters = "all")
+  oof_cate_ctrl_obs[val_idx] <- predict(cf_k_co, X_pol_obs_va[, selected_ctrl_obs])$predictions
+  
+  cf_k_eo <- causal_forest(X_pol_obs_tr[, selected_emot_obs], Y_emot_tr, W_tr,
+                             W.hat = W_hat_tr, Y.hat = Y_hat_emot_obs_tr,
+                             num.trees = 2000, tune.parameters = "all")
+  oof_cate_emot_obs[val_idx] <- predict(cf_k_eo, X_pol_obs_va[, selected_emot_obs])$predictions
+  
+  cat("Fold", k, "of", K, "complete\n")
+}
+
+cat("\nSpec A OOF CATE summary (Physical/Sexual):\n"); summary(oof_cate_phys)
+cat("\nSpec B OOF CATE summary (Physical/Sexual):\n"); summary(oof_cate_phys_pol)
+cat("\nSpec C OOF CATE summary (Physical/Sexual):\n"); summary(oof_cate_phys_obs)
+```
+
+## Out-of-Fold CATE Distributions
+
+```{r cf-predictions, fig.width=12, fig.height=5}
+cate_oof_df <- data.frame(
+  CATE = c(oof_cate_phys, oof_cate_phys_pol, oof_cate_phys_obs),
+  Specification = factor(rep(
+    c("Spec A (All Selected)", "Spec B (Policy-Relevant)", "Spec C (Observable)"),
+    each = n
+  ), levels = c("Spec A (All Selected)", "Spec B (Policy-Relevant)", "Spec C (Observable)"))
+)
+
+cate_mean_df <- data.frame(
+  Specification = factor(
+    c("Spec A (All Selected)", "Spec B (Policy-Relevant)", "Spec C (Observable)"),
+    levels = c("Spec A (All Selected)", "Spec B (Policy-Relevant)", "Spec C (Observable)")
+  ),
+  Mean = c(mean(oof_cate_phys), mean(oof_cate_phys_pol), mean(oof_cate_phys_obs))
+)
+
+ggplot(cate_oof_df, aes(x = CATE)) +
+  geom_density(fill = "steelblue", alpha = 0.4) +
+  geom_vline(xintercept = 0, color = "blue", linetype = "dotted") +
+  geom_vline(data = cate_mean_df, aes(xintercept = Mean), color = "red", linetype = "dotted") +
+  facet_wrap(~ Specification, scales = "free") +
+  labs(title = "Out-of-Fold CATE Distributions (Physical/Sexual Violence)",
+       subtitle = "Blue dotted = zero  |  Red dotted = mean CATE",
+       x = "Treatment Effect", y = "Density") +
+  theme_minimal()
+```
+
+## Confidence Intervals for CATEs
+
+```{r cf-confidence-intervals, fig.width=8, fig.height=5}
+# OOB predictions with variance estimates from the full-data forest
+oob_ci <- predict(cf, estimate.variance = TRUE)
+oob_cate_phys <- oob_ci$predictions
+sigma_hat <- sqrt(oob_ci$variance.estimates)
+ord <- order(oob_cate_phys)
+
+ci_df <- data.frame(
+  rank  = seq_along(ord),
+  cate  = oob_cate_phys[ord],
+  lower = (oob_cate_phys - 1.96 * sigma_hat)[ord],
+  upper = (oob_cate_phys + 1.96 * sigma_hat)[ord]
+)
+
+ggplot(ci_df, aes(x = rank, y = cate)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "grey70", alpha = 0.5) +
+  geom_line(color = "black") +
+  geom_hline(yintercept = 0, color = "blue", linetype = "dotted") +
+  geom_hline(yintercept = mean(oob_cate_phys), color = "red", linetype = "dotted") +
+  labs(title = "Individual CATEs with 95% CI (OOB, Full Data)",
+       subtitle = "Blue dotted = zero  |  Red dotted = mean CATE",
+       x = "Observation (sorted by CATE)", y = "Treatment Effect") +
+  theme_minimal()
+```
+
+---
+
+# Part 4: Results, Interpretation & Validation
+
+## 4.1 Comparison Table: OLS vs Causal Forest
+
+```{r comparison-table}
+m_phys <- lm(as.formula(paste("el_physical ~ p_treat + bl_physical +", controls_formula)), data = dfa)
+m_ctrl_lpm <- lm(as.formula(paste("el_control ~ p_treat + bl_control +", controls_formula)), data = dfa)
+m_emot_lpm <- lm(as.formula(paste("el_emotional ~ p_treat + bl_emotional +", controls_formula)), data = dfa)
+
+se_phys <- sqrt(diag(vcovCL(m_phys, cluster = dfa$bl_a05)))["p_treat"]
+se_ctrl_lpm <- sqrt(diag(vcovCL(m_ctrl_lpm, cluster = dfa$bl_a05)))["p_treat"]
+se_emot_lpm <- sqrt(diag(vcovCL(m_emot_lpm, cluster = dfa$bl_a05)))["p_treat"]
+
+comparison_table <- data.frame(
+  Outcome = c("Physical/Sexual Violence", "Controlling Behaviors", "Emotional Violence"),
+  OLS_ATE = round(c(coef(m_phys)["p_treat"], coef(m_ctrl_lpm)["p_treat"], coef(m_emot_lpm)["p_treat"]), 4),
+  OLS_SE = round(c(se_phys, se_ctrl_lpm, se_emot_lpm), 4),
+  CF_ATE = round(c(ate_all[1], ate_ctrl[1], ate_emot[1]), 4),
+  CF_SE = round(c(ate_all[2], ate_ctrl[2], ate_emot[2]), 4),
+  Control_Mean = round(c(
+    mean(dfa$el_physical[dfa$p_treat == 0], na.rm = TRUE),
+    mean(dfa$el_control[dfa$p_treat == 0], na.rm = TRUE),
+    mean(dfa$el_emotional[dfa$p_treat == 0], na.rm = TRUE)
+  ), 3)
+)
+
+comparison_table$OLS_pct_reduction <- round(comparison_table$OLS_ATE / comparison_table$Control_Mean * 100, 1)
+comparison_table$CF_pct_reduction  <- round(comparison_table$CF_ATE / comparison_table$Control_Mean * 100, 1)
+
+knitr::kable(comparison_table, 
+             col.names = c("Outcome", "OLS ATE", "OLS SE", "CF ATE", "CF SE", 
+                           "Control Mean", "OLS % Reduction", "CF % Reduction"))
+
+# Specification A vs B vs C comparison
+spec_comparison <- data.frame(
+  Outcome = c("Physical/Sexual Violence", "Controlling Behaviors", "Emotional Violence"),
+  Spec_A_ATE = round(c(ate_all[1], ate_ctrl[1], ate_emot[1]), 4),
+  Spec_A_SE = round(c(ate_all[2], ate_ctrl[2], ate_emot[2]), 4),
+  Spec_B_ATE = round(c(ate_all_pol[1], ate_ctrl_pol[1], ate_emot_pol[1]), 4),
+  Spec_B_SE = round(c(ate_all_pol[2], ate_ctrl_pol[2], ate_emot_pol[2]), 4),
+  Spec_C_ATE = round(c(ate_all_obs[1], ate_ctrl_obs[1], ate_emot_obs[1]), 4),
+  Spec_C_SE = round(c(ate_all_obs[2], ate_ctrl_obs[2], ate_emot_obs[2]), 4)
+)
+
+knitr::kable(spec_comparison, 
+             col.names = c("Outcome", "Spec A ATE", "Spec A SE", "Spec B ATE", "Spec B SE",
+                           "Spec C ATE", "Spec C SE"),
+             caption = "Specification A vs B vs C: Effect of Covariate Restrictions")
+```
+
+Both the OLS and the Causal Forest should agree on the direction and rough magnitude of the treatment effects across all three outcomes, since this is an RCT and both methods should recover the same average effect under randomization. The causal forest now uses the Athey/Wager two-step pipeline (propensity orthogonalization + outcome-based variable selection), which should improve efficiency. Compare the CF ATE estimates with the OLS estimates — they should be close, which confirms the forest is well-calibrated at the average level.
+
+## 4.2 Best Linear Projection (Heterogeneity Drivers)
+
+```{r blp-all}
+cat("=== Specification A ===")
+cat("\n--- Best Linear Projection: Physical/Sexual Violence ---\n")
+blp_phys <- best_linear_projection(cf, X[, selected_phys])
+print(blp_phys)
+
+cat("\n--- Best Linear Projection: Controlling Behaviors ---\n")
+blp_ctrl <- best_linear_projection(cf_ctrl, X[, selected_ctrl])
+print(blp_ctrl)
+
+cat("\n--- Best Linear Projection: Emotional Violence ---\n")
+blp_emot <- best_linear_projection(cf_emot, X[, selected_emot])
+print(blp_emot)
+
+cat("\n=== Specification B (Policy-Relevant) ===")
+cat("\n--- Best Linear Projection: Physical/Sexual Violence ---\n")
+blp_phys_pol <- best_linear_projection(cf_pol, X_pol_phys[, selected_phys_pol])
+print(blp_phys_pol)
+
+cat("\n--- Best Linear Projection: Controlling Behaviors ---\n")
+blp_ctrl_pol <- best_linear_projection(cf_ctrl_pol, X_pol_ctrl[, selected_ctrl_pol])
+print(blp_ctrl_pol)
+
+cat("\n--- Best Linear Projection: Emotional Violence ---\n")
+blp_emot_pol <- best_linear_projection(cf_emot_pol, X_pol_emot[, selected_emot_pol])
+print(blp_emot_pol)
+
+cat("\n=== Specification C (Purely Observable) ===")
+cat("\n--- Best Linear Projection: Physical/Sexual Violence ---\n")
+blp_phys_obs <- best_linear_projection(cf_phys_obs, X_pol_obs[, selected_phys_obs])
+print(blp_phys_obs)
+
+cat("\n--- Best Linear Projection: Controlling Behaviors ---\n")
+blp_ctrl_obs <- best_linear_projection(cf_ctrl_obs, X_pol_obs[, selected_ctrl_obs])
+print(blp_ctrl_obs)
+
+cat("\n--- Best Linear Projection: Emotional Violence ---\n")
+blp_emot_obs <- best_linear_projection(cf_emot_obs, X_pol_obs[, selected_emot_obs])
+print(blp_emot_obs)
+```
+
+
+The BLP results help us understand which covariates are associated with treatment effect heterogeneity — basically for whom the program works better or worse. Note that the BLP now only includes the selected covariates from the outcome regression forest pre-selection step, so the set of variables examined may differ across outcomes.
+
+
+## 4.3 CATE Quartile Analysis
+
+```{r cate-quartiles}
+quartile_analysis <- function(Y_vec, W_vec, cate_preds, outcome_name) {
+  q25 <- quantile(cate_preds, 0.25)
+  q75 <- quantile(cate_preds, 0.75)
+  
+  ate_low <- mean(Y_vec[W_vec == 1 & cate_preds <= q25]) - 
+             mean(Y_vec[W_vec == 0 & cate_preds <= q25])
+  ate_mid <- mean(Y_vec[W_vec == 1 & cate_preds > q25 & cate_preds <= q75]) - 
+             mean(Y_vec[W_vec == 0 & cate_preds > q25 & cate_preds <= q75])
+  ate_high <- mean(Y_vec[W_vec == 1 & cate_preds > q75]) - 
+              mean(Y_vec[W_vec == 0 & cate_preds > q75])
+  
+  data.frame(Outcome = outcome_name,
+             Q1_lowest = round(ate_low, 4),
+             Q2_Q3_middle = round(ate_mid, 4),
+             Q4_highest = round(ate_high, 4),
+             Spread = round(ate_high - ate_low, 4))
+}
+
+# Spec A: using out-of-fold predictions from k-fold CV
+q_table <- rbind(
+  quartile_analysis(Y, W, oof_cate_phys, "Physical/Sexual"),
+  quartile_analysis(Y_ctrl, W, oof_cate_ctrl, "Controlling"),
+  quartile_analysis(Y_emot, W, oof_cate_emot, "Emotional")
+)
+knitr::kable(q_table, caption = "Spec A: Realized ATEs by Predicted CATE Quartile (K-Fold OOF)")
+
+# Spec B: policy-relevant
+q_table_pol <- rbind(
+  quartile_analysis(Y, W, oof_cate_phys_pol, "Physical/Sexual"),
+  quartile_analysis(Y_ctrl, W, oof_cate_ctrl_pol, "Controlling"),
+  quartile_analysis(Y_emot, W, oof_cate_emot_pol, "Emotional")
+)
+knitr::kable(q_table_pol, caption = "Spec B (Policy): Realized ATEs by Predicted CATE Quartile (K-Fold OOF)")
+
+# Spec C: purely observable
+q_table_obs <- rbind(
+  quartile_analysis(Y, W, oof_cate_phys_obs, "Physical/Sexual"),
+  quartile_analysis(Y_ctrl, W, oof_cate_ctrl_obs, "Controlling"),
+  quartile_analysis(Y_emot, W, oof_cate_emot_obs, "Emotional")
+)
+knitr::kable(q_table_obs, caption = "Spec C (Observable): Realized ATEs by Predicted CATE Quartile (K-Fold OOF)")
+
+# CATE heterogeneity summary across all three specifications
+cate_summary <- data.frame(
+  Specification = rep(c("A (Full)", "B (Policy)", "C (Observable)"), each = 3),
+  Outcome = rep(c("Physical/Sexual", "Controlling", "Emotional"), 3),
+  Mean = round(c(mean(oof_cate_phys), mean(oof_cate_ctrl), mean(oof_cate_emot),
+                  mean(oof_cate_phys_pol), mean(oof_cate_ctrl_pol), mean(oof_cate_emot_pol),
+                  mean(oof_cate_phys_obs), mean(oof_cate_ctrl_obs), mean(oof_cate_emot_obs)), 4),
+  SD = round(c(sd(oof_cate_phys), sd(oof_cate_ctrl), sd(oof_cate_emot),
+                sd(oof_cate_phys_pol), sd(oof_cate_ctrl_pol), sd(oof_cate_emot_pol),
+                sd(oof_cate_phys_obs), sd(oof_cate_ctrl_obs), sd(oof_cate_emot_obs)), 4),
+  Min = round(c(min(oof_cate_phys), min(oof_cate_ctrl), min(oof_cate_emot),
+                 min(oof_cate_phys_pol), min(oof_cate_ctrl_pol), min(oof_cate_emot_pol),
+                 min(oof_cate_phys_obs), min(oof_cate_ctrl_obs), min(oof_cate_emot_obs)), 4),
+  Max = round(c(max(oof_cate_phys), max(oof_cate_ctrl), max(oof_cate_emot),
+                 max(oof_cate_phys_pol), max(oof_cate_ctrl_pol), max(oof_cate_emot_pol),
+                 max(oof_cate_phys_obs), max(oof_cate_ctrl_obs), max(oof_cate_emot_obs)), 4),
+  IQR = round(c(IQR(oof_cate_phys), IQR(oof_cate_ctrl), IQR(oof_cate_emot),
+                 IQR(oof_cate_phys_pol), IQR(oof_cate_ctrl_pol), IQR(oof_cate_emot_pol),
+                 IQR(oof_cate_phys_obs), IQR(oof_cate_ctrl_obs), IQR(oof_cate_emot_obs)), 4)
+)
+
+knitr::kable(cate_summary, caption = "CATE Distribution Summary Across Specifications (K-Fold OOF)")
+```
+
+```{r cate-profile}
+cf_data_plot <- cf_data
+cf_data_plot$cate_phys <- oof_cate_phys
+cf_data_plot$cate_group <- cut(oof_cate_phys, 
+  breaks = quantile(oof_cate_phys, c(0, 0.25, 0.75, 1)),
+  labels = c("Most helped", "Middle", "Least helped"),
+  include.lowest = TRUE)
+
+profile <- cf_data_plot %>%
+  group_by(cate_group) %>%
+  summarise(
+    n = n(),
+    age = round(mean(bl_age, na.rm = TRUE), 1),
+    pct_secondary_edu = round(mean(bl_edu_sec, na.rm = TRUE) * 100, 1),
+    pct_colombian = round(mean(bl_colom, na.rm = TRUE) * 100, 1),
+    pct_indigenous = round(mean(bl_indig, na.rm = TRUE) * 100, 1),
+    pct_married = round(mean(bl_married, na.rm = TRUE) * 100, 1),
+    pct_baseline_violence = round(mean(bl_physical, na.rm = TRUE) * 100, 1),
+    mean_asset_index = round(mean(bl_asset_index, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+knitr::kable(profile, caption = "Profile of Women by CATE Group (Physical/Sexual Violence)")
+```
+
+The quartile table tells us whether the causal forest is picking up meaningful heterogeneity or just noise. Look at the spread between the top and bottom quartile — a larger spread suggests meaningful heterogeneity detection. With k-fold CV, every observation has a truly out-of-sample CATE prediction, avoiding overfitting concerns. Compare Spec A and Spec B: if the quartile spread shrinks substantially in Spec B, the cross-outcome baseline IPV variables were important heterogeneity drivers (but not actionable for policy).
+
+The profile table helps us see who falls into each CATE group. This is useful for understanding the practical implications of the heterogeneity — if we were to target the intervention, what kind of women should we prioritize?
+
+## 4.4 Validation
+
+### Omnibus Test for Heterogeneity
+
+```{r calibration-test}
+cat("=== Specification A ===\n")
+test_cal <- test_calibration(cf)
+print(test_cal)
+
+cat("\n=== Specification B (Policy-Relevant) ===\n")
+test_cal_pol <- test_calibration(cf_pol)
+print(test_cal_pol)
+
+cat("\n=== Specification C (Purely Observable) ===\n")
+test_cal_obs <- test_calibration(cf_phys_obs)
+print(test_cal_obs)
+```
+
+The calibration test is key because it tells us whether the causal forest is detecting real heterogeneity or just overfitting to noise. We look at two things: the `mean.forest.prediction` coefficient tells us if the average prediction is well-calibrated (we want it close to 1 and significant), and the `differential.forest.prediction` tells us if there is actual heterogeneity. With the refined pipeline (orthogonalized W.hat and Y.hat, selected covariates), the calibration test may show improved results compared to the baseline approach. Examine the p-values in the output above.
+
+
+
+### Variable Importance
+
+```{r variable-importance, fig.width=8, fig.height=6}
+vi_phys <- variable_importance(cf)
+vi_ctrl <- variable_importance(cf_ctrl)
+vi_emot <- variable_importance(cf_emot)
+
+# Diagnostic: check whether the causal forests produced any splits
+# If tune.parameters = "all" detects no heterogeneity, it may set min.node.size
+# so high that zero splits occur, resulting in zero variable importance.
+cat("=== Causal Forest Split Diagnostics (Spec A) ===\n")
+cat("Physical — total importance:", sum(vi_phys),
+    "| max importance:", max(vi_phys),
+    "| non-zero vars:", sum(vi_phys > 0), "of", length(vi_phys), "\n")
+cat("Controlling — total importance:", sum(vi_ctrl),
+    "| max importance:", max(vi_ctrl),
+    "| non-zero vars:", sum(vi_ctrl > 0), "of", length(vi_ctrl), "\n")
+cat("Emotional — total importance:", sum(vi_emot),
+    "| max importance:", max(vi_emot),
+    "| non-zero vars:", sum(vi_emot > 0), "of", length(vi_emot), "\n")
+
+if (sum(vi_phys) == 0) {
+  cat("\nNOTE: The Physical/Sexual violence causal forest has zero variable importance.\n")
+  cat("This means the forest detected no significant treatment effect heterogeneity\n")
+  cat("and tuned itself to not split. This is a genuine result, not a code error.\n")
+  cat("The forest effectively estimates a constant treatment effect for this outcome.\n")
+}
+
+# Also compute unweighted split frequencies as an alternative diagnostic
+# decay.exponent = 0 weights all splits equally regardless of depth
+vi_phys_unw <- variable_importance(cf, decay.exponent = 0, max.depth = 4)
+cat("\nPhysical unweighted importance (decay.exponent=0):\n")
+print(round(as.numeric(vi_phys_unw), 6))
+
+# Each forest uses different selected variables — create separate importance data frames
+vi_phys_df <- data.frame(variable = names(X)[selected_phys], 
+                          Importance = round(as.numeric(vi_phys), 6))
+vi_ctrl_df <- data.frame(variable = names(X)[selected_ctrl], 
+                          Importance = round(as.numeric(vi_ctrl), 6))
+vi_emot_df <- data.frame(variable = names(X)[selected_emot], 
+                          Importance = round(as.numeric(vi_emot), 6))
+
+# Wide format summary table
+vi_wide <- vi_phys_df %>% 
+  rename(Physical = Importance) %>%
+  full_join(vi_ctrl_df %>% rename(Controlling = Importance), by = "variable") %>%
+  full_join(vi_emot_df %>% rename(Emotional = Importance), by = "variable") %>%
+  arrange(desc(Physical))
+
+knitr::kable(vi_wide, caption = "Causal Forest Variable Importance (Selected Variables Only)")
+
+ggplot(vi_phys_df %>% arrange(desc(Importance)) %>% head(10), 
+       aes(x = reorder(variable, Importance), y = Importance)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Top Variables Driving Heterogeneity (Physical/Sexual Violence)",
+       subtitle = "Specification A",
+       x = "", y = "Importance") +
+  theme_minimal()
+
+# Specification C: causal forest variable importance
+vi_phys_obs_cf <- variable_importance(cf_phys_obs)
+vi_ctrl_obs_cf <- variable_importance(cf_ctrl_obs)
+vi_emot_obs_cf <- variable_importance(cf_emot_obs)
+
+cat("\n=== Causal Forest Split Diagnostics (Spec C) ===\n")
+cat("Physical — total importance:", sum(vi_phys_obs_cf),
+    "| max importance:", max(vi_phys_obs_cf),
+    "| non-zero vars:", sum(vi_phys_obs_cf > 0), "of", length(vi_phys_obs_cf), "\n")
+cat("Controlling — total importance:", sum(vi_ctrl_obs_cf),
+    "| max importance:", max(vi_ctrl_obs_cf),
+    "| non-zero vars:", sum(vi_ctrl_obs_cf > 0), "of", length(vi_ctrl_obs_cf), "\n")
+cat("Emotional — total importance:", sum(vi_emot_obs_cf),
+    "| max importance:", max(vi_emot_obs_cf),
+    "| non-zero vars:", sum(vi_emot_obs_cf > 0), "of", length(vi_emot_obs_cf), "\n")
+
+if (sum(vi_phys_obs_cf) == 0) {
+  cat("\nNOTE: Spec C Physical/Sexual violence causal forest also has zero importance.\n")
+  cat("Confirms no detectable heterogeneity for this outcome with observable covariates.\n")
+}
+
+vi_phys_obs_cf_df <- data.frame(variable = names(X_pol_obs)[selected_phys_obs], 
+                                 Importance = round(as.numeric(vi_phys_obs_cf), 6))
+vi_ctrl_obs_cf_df <- data.frame(variable = names(X_pol_obs)[selected_ctrl_obs], 
+                                 Importance = round(as.numeric(vi_ctrl_obs_cf), 6))
+vi_emot_obs_cf_df <- data.frame(variable = names(X_pol_obs)[selected_emot_obs], 
+                                 Importance = round(as.numeric(vi_emot_obs_cf), 6))
+
+vi_wide_obs <- vi_phys_obs_cf_df %>% 
+  rename(Physical = Importance) %>%
+  full_join(vi_ctrl_obs_cf_df %>% rename(Controlling = Importance), by = "variable") %>%
+  full_join(vi_emot_obs_cf_df %>% rename(Emotional = Importance), by = "variable") %>%
+  arrange(desc(Physical))
+
+knitr::kable(vi_wide_obs, caption = "Causal Forest Variable Importance — Specification C (Purely Observable)")
+
+ggplot(vi_phys_obs_cf_df %>% arrange(desc(Importance)) %>% head(10), 
+       aes(x = reorder(variable, Importance), y = Importance)) +
+  geom_col(fill = "darkgreen", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Top Variables Driving Heterogeneity (Physical/Sexual Violence)",
+       subtitle = "Specification C (Purely Observable)",
+       x = "", y = "Importance") +
+  theme_minimal()
+```
+
+The variable importance from causal forests measures which covariates drive **treatment effect heterogeneity** — this is conceptually different from the outcome regression forest importance in Step 2 (which measures covariates that predict IPV *levels*). A variable can be a strong predictor of outcomes without driving heterogeneous treatment effects. If the causal forest importance is zero for physical/sexual violence, it means the forest detected no significant heterogeneity in the treatment effect for that outcome and tuned itself to produce essentially no splits. This is a genuine finding — the treatment effect on physical violence is approximately constant across the covariate space — and is consistent with the calibration test results and the original paper's finding of a small, borderline-significant effect on physical violence.
+
+---
+
+# Part 5: Robustness Checks
+
+## 5.1 Overlap / Propensity Score Check
+
+Since this is an RCT, the propensity scores should be approximately constant across individuals and the distributions for treated and control groups should overlap nearly perfectly. This is a basic sanity check — any separation would signal problems with the randomization.
+
+```{r overlap-check, fig.width=8, fig.height=5}
+overlap_df <- data.frame(
+  W_hat = W_hat,
+  Treatment = factor(W, labels = c("Control", "Treated"))
+)
+
+ggplot(overlap_df, aes(x = W_hat, fill = Treatment)) +
+  geom_density(alpha = 0.5) +
+  geom_vline(xintercept = mean(W), lty = 2, col = "black") +
+  labs(title = "Propensity Score Distribution by Treatment Status",
+       subtitle = "RCT: distributions should overlap almost perfectly",
+       x = "Estimated Propensity Score (W.hat)", y = "Density") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1")
+
+cat("Propensity score range (Control):", 
+    round(range(W_hat[W == 0]), 4), "\n")
+cat("Propensity score range (Treated):", 
+    round(range(W_hat[W == 1]), 4), "\n")
+cat("Mean propensity score (Control):", 
+    round(mean(W_hat[W == 0]), 4), "\n")
+cat("Mean propensity score (Treated):", 
+    round(mean(W_hat[W == 1]), 4), "\n")
+```
+
+The propensity scores should cluster tightly around `r round(mean(W), 3)` for both groups. Any meaningful separation would be a red flag, but in this RCT context we expect near-perfect overlap, confirming that the orthogonalization with W.hat is appropriate.
+
+## 5.2 Placebo Test (Permutation of Treatment)
+
+We randomly shuffle the treatment assignment and re-estimate the causal forest for physical/sexual violence. Under the null of no treatment effect and no heterogeneity, the resulting CATEs should collapse to near zero. If the placebo forest still finds large treatment effects or heterogeneity, it would suggest our main results are driven by noise.
+
+```{r placebo-test, fig.width=12, fig.height=5}
+set.seed(42)
+
+# Shuffle treatment assignment
+W_placebo <- sample(W)
+
+# Re-estimate propensity and outcome forests with placebo W
+rf_W_placebo <- regression_forest(X, W_placebo, tune.parameters = "all")
+W_hat_placebo <- predict(rf_W_placebo)$predictions
+
+cf_placebo <- causal_forest(X[, selected_phys], Y, W_placebo,
+                             W.hat = W_hat_placebo,
+                             Y.hat = Y_hat_phys,
+                             num.trees = 4000,
+                             tune.parameters = "all")
+
+ate_placebo <- average_treatment_effect(cf_placebo, target.sample = "all")
+cate_placebo <- predict(cf_placebo, X[, selected_phys])$predictions
+
+# Spec C placebo
+cf_placebo_obs <- causal_forest(X_pol_obs[, selected_phys_obs], Y, W_placebo,
+                                 W.hat = W_hat_placebo,
+                                 Y.hat = Y_hat_phys_obs,
+                                 num.trees = 4000,
+                                 tune.parameters = "all")
+ate_placebo_obs <- average_treatment_effect(cf_placebo_obs, target.sample = "all")
+cate_placebo_obs <- predict(cf_placebo_obs, X_pol_obs[, selected_phys_obs])$predictions
+
+cat("=== Placebo Test (Spec A) ===\n")
+cat("Placebo ATE:", round(ate_placebo[1], 4), " SE:", round(ate_placebo[2], 4), "\n")
+cat("Placebo CATE range:", round(range(cate_placebo), 4), "\n")
+cat("Placebo CATE SD:", round(sd(cate_placebo), 4), "\n\n")
+
+cat("=== Placebo Test (Spec C) ===\n")
+cat("Placebo ATE:", round(ate_placebo_obs[1], 4), " SE:", round(ate_placebo_obs[2], 4), "\n")
+cat("Placebo CATE range:", round(range(cate_placebo_obs), 4), "\n")
+cat("Placebo CATE SD:", round(sd(cate_placebo_obs), 4), "\n\n")
+
+# Calibration test on placebo
+cat("Placebo calibration test (Spec A):\n")
+print(test_calibration(cf_placebo))
+cat("\nPlacebo calibration test (Spec C):\n")
+print(test_calibration(cf_placebo_obs))
+
+# Compare CATE distributions
+par(mfrow = c(1, 3))
+d_real <- density(oob_cate_phys)
+d_plac <- density(cate_placebo)
+d_plac_obs <- density(cate_placebo_obs)
+xlims <- range(c(d_real$x, d_plac$x, d_plac_obs$x))
+
+plot(d_real, main = "Real Treatment CATEs (Spec A)",
+     xlab = "Treatment Effect", xlim = xlims)
+abline(v = 0, col = "blue", lty = 3)
+abline(v = mean(oob_cate_phys), col = "red", lty = 3)
+
+plot(d_plac, main = "Placebo CATEs (Spec A, Shuffled W)",
+     xlab = "Treatment Effect", xlim = xlims)
+abline(v = 0, col = "blue", lty = 3)
+abline(v = mean(cate_placebo), col = "red", lty = 3)
+
+plot(d_plac_obs, main = "Placebo CATEs (Spec C, Shuffled W)",
+     xlab = "Treatment Effect", xlim = xlims)
+abline(v = 0, col = "blue", lty = 3)
+abline(v = mean(cate_placebo_obs), col = "red", lty = 3)
+par(mfrow = c(1, 1))
+```
+
+If the pipeline is working correctly, the placebo ATE should be close to zero (within noise), the CATE distribution should be much tighter than the real one, and the calibration test should show no significance. This confirms that our main findings are not artefacts of the forest overfitting.
+
+## 5.3 Full vs Selected Covariates Comparison
+
+We compare our refined causal forest (with pre-selected covariates and orthogonalization) against a baseline forest using all 19 covariates without orthogonalization. If the results are qualitatively similar, it increases confidence. If the refined pipeline shows tighter estimates or better calibration, it demonstrates the value of the two-step approach.
+
+```{r full-vs-selected, fig.width=10, fig.height=5}
+set.seed(100241)
+
+# Baseline causal forest: all covariates, no orthogonalization
+cf_full <- causal_forest(X, Y, W,
+                          num.trees = 4000,
+                          sample.fraction = 0.5,
+                          mtry = min(ceiling(sqrt(ncol(X)) + 20), ncol(X)),
+                          min.node.size = 20,
+                          honesty = TRUE,
+                          honesty.fraction = 0.5,
+                          honesty.prune.leaves = TRUE,
+                          tune.parameters = "none",
+                          compute.oob.predictions = TRUE)
+
+ate_full <- average_treatment_effect(cf_full, target.sample = "all")
+cate_full <- predict(cf_full)$predictions  # OOB predictions
+
+cat("=== Physical/Sexual Violence ===\n")
+cat("Full covariates ATE:", round(ate_full[1], 4), " SE:", round(ate_full[2], 4), "\n")
+cat("Selected covariates (Spec A) ATE:", round(ate_all[1], 4), " SE:", round(ate_all[2], 4), "\n")
+cat("Observable covariates (Spec C) ATE:", round(ate_all_obs[1], 4), " SE:", round(ate_all_obs[2], 4), "\n\n")
+
+# Calibration comparison
+cat("Calibration test — Full covariates:\n")
+print(test_calibration(cf_full))
+cat("\nCalibration test — Selected covariates (Spec A):\n")
+print(test_calibration(cf))
+cat("\nCalibration test — Observable covariates (Spec C):\n")
+print(test_calibration(cf_phys_obs))
+
+# Compare CATE distributions
+par(mfrow = c(1, 3))
+d_full <- density(cate_full)
+d_sel  <- density(oob_cate_phys)
+cate_obs_oob <- predict(cf_phys_obs)$predictions
+d_obs  <- density(cate_obs_oob)
+xlims <- range(c(d_full$x, d_sel$x, d_obs$x))
+
+plot(d_full, main = "CATEs: Full Covariates (19 vars)",
+     xlab = "Treatment Effect", xlim = xlims)
+abline(v = c(0, mean(cate_full)), col = c("blue", "red"), lty = 3)
+
+plot(d_sel, main = paste0("CATEs: Spec A Selected (", length(selected_phys), " vars)"),
+     xlab = "Treatment Effect", xlim = xlims)
+abline(v = c(0, mean(oob_cate_phys)), col = c("blue", "red"), lty = 3)
+
+plot(d_obs, main = paste0("CATEs: Spec C Observable (", length(selected_phys_obs), " vars)"),
+     xlab = "Treatment Effect", xlim = xlims)
+abline(v = c(0, mean(cate_obs_oob)), col = c("blue", "red"), lty = 3)
+par(mfrow = c(1, 1))
+```
+
+```{r full-vs-selected-table}
+comparison_robustness <- data.frame(
+  Specification = c("Full covariates (baseline)", 
+                     "Spec A: Selected + orthogonalized",
+                     "Spec C: Observable + orthogonalized"),
+  ATE = round(c(ate_full[1], ate_all[1], ate_all_obs[1]), 4),
+  SE = round(c(ate_full[2], ate_all[2], ate_all_obs[2]), 4),
+  CATE_SD = round(c(sd(cate_full), sd(oob_cate_phys), sd(cate_obs_oob)), 4),
+  CATE_Range = c(
+    paste0("[", round(min(cate_full), 4), ", ", round(max(cate_full), 4), "]"),
+    paste0("[", round(min(oob_cate_phys), 4), ", ", round(max(oob_cate_phys), 4), "]"),
+    paste0("[", round(min(cate_obs_oob), 4), ", ", round(max(cate_obs_oob), 4), "]")
+  ),
+  N_vars = c(ncol(X), length(selected_phys), length(selected_phys_obs))
+)
+
+knitr::kable(comparison_robustness, 
+             caption = "Comparison: Full vs Selected vs Observable Covariates (Physical/Sexual Violence)")
+```
+
+The key things to look for: (1) ATEs should be similar across specifications — if they diverge substantially, one model may be misspecified. (2) The refined pipeline should ideally show a similar or tighter CATE distribution with better calibration test results, confirming that pre-selection and orthogonalization helped rather than hurt.
+
+## 5.4 Selection Threshold Sensitivity
+
+The default threshold for variable selection is 0.2 × mean importance. Here we test two alternative thresholds — a more permissive one (0.1×, keeps more variables) and a stricter one (0.5×, keeps fewer) — to check whether results are sensitive to this choice.
+
+```{r threshold-sensitivity}
+set.seed(100241)
+
+thresholds <- c(0.1, 0.2, 0.5)
+sensitivity_results <- data.frame()
+
+for (thr in thresholds) {
+  sel <- which(Y_vi_phys / mean(Y_vi_phys) > thr)
+  n_sel <- length(sel)
+  
+  cf_sens <- causal_forest(X[, sel], Y, W,
+                            W.hat = W_hat,
+                            Y.hat = Y_hat_phys,
+                            num.trees = 4000,
+                            tune.parameters = "all")
+  
+  ate_sens <- average_treatment_effect(cf_sens, target.sample = "all")
+  cate_sens <- predict(cf_sens, X[, sel])$predictions
+  cal_sens <- test_calibration(cf_sens)
+  
+  sensitivity_results <- rbind(sensitivity_results, data.frame(
+    Threshold = paste0(thr, "x"),
+    N_vars = n_sel,
+    Variables = paste(names(X)[sel], collapse = ", "),
+    ATE = round(ate_sens[1], 4),
+    SE = round(ate_sens[2], 4),
+    CATE_SD = round(sd(cate_sens), 4),
+    Cal_mean_p = round(cal_sens[1, 4], 4),
+    Cal_diff_p = round(cal_sens[2, 4], 4)
+  ))
+}
+
+knitr::kable(sensitivity_results %>% select(-Variables), 
+             caption = "Sensitivity to Variable Selection Threshold (Physical/Sexual Violence)",
+             col.names = c("Threshold", "# Vars", "ATE", "SE", "CATE SD", 
+                           "Calibration (mean) p", "Calibration (diff) p"))
+```
+
+```{r threshold-vars}
+cat("Variables selected at each threshold:\n\n")
+for (i in 1:nrow(sensitivity_results)) {
+  cat(sensitivity_results$Threshold[i], "(", sensitivity_results$N_vars[i], "vars):",
+      sensitivity_results$Variables[i], "\n\n")
+}
+```
+
+If the ATE is stable across thresholds but the calibration test improves at one particular threshold, that gives guidance on the optimal level of pre-selection. Large swings in ATE would suggest the results are sensitive and should be interpreted cautiously.
+
+## 5.5 Bootstrap ATE Confidence Intervals
+
+The `average_treatment_effect` function provides asymptotic standard errors. Here we complement these with bootstrap confidence intervals by re-estimating the causal forest on B bootstrap samples and collecting the ATE distribution.
+
+```{r bootstrap-ate, fig.width=10, fig.height=5}
+set.seed(12345)
+B <- 200  # number of bootstrap replications
+
+boot_ate_phys <- numeric(B)
+boot_ate_ctrl <- numeric(B)
+boot_ate_emot <- numeric(B)
+n <- nrow(cf_data)  # re-stated explicitly; cf_data is unchanged from cv-setup
+
+for (b in 1:B) {
+  idx <- sample(1:n, n, replace = TRUE)
+  X_b <- X[idx, ]
+  Y_b <- Y[idx]
+  W_b <- W[idx]
+  Y_ctrl_b <- Y_ctrl[idx]
+  Y_emot_b <- Y_emot[idx]
+  W_hat_b <- W_hat[idx]
+  Y_hat_phys_b <- Y_hat_phys[idx]
+  Y_hat_ctrl_b <- Y_hat_ctrl[idx]
+  Y_hat_emot_b <- Y_hat_emot[idx]
+  
+  cf_b_phys <- causal_forest(X_b[, selected_phys], Y_b, W_b,
+                              W.hat = W_hat_b, Y.hat = Y_hat_phys_b,
+                              num.trees = 2000, tune.parameters = "none")
+  boot_ate_phys[b] <- average_treatment_effect(cf_b_phys, target.sample = "all")[1]
+  
+  cf_b_ctrl <- causal_forest(X_b[, selected_ctrl], Y_ctrl_b, W_b,
+                              W.hat = W_hat_b, Y.hat = Y_hat_ctrl_b,
+                              num.trees = 2000, tune.parameters = "none")
+  boot_ate_ctrl[b] <- average_treatment_effect(cf_b_ctrl, target.sample = "all")[1]
+  
+  cf_b_emot <- causal_forest(X_b[, selected_emot], Y_emot_b, W_b,
+                              W.hat = W_hat_b, Y.hat = Y_hat_emot_b,
+                              num.trees = 2000, tune.parameters = "none")
+  boot_ate_emot[b] <- average_treatment_effect(cf_b_emot, target.sample = "all")[1]
+}
+
+# Summary table
+boot_table <- data.frame(
+  Outcome = c("Physical/Sexual", "Controlling", "Emotional"),
+  Point_ATE = round(c(ate_all[1], ate_ctrl[1], ate_emot[1]), 4),
+  Asymptotic_SE = round(c(ate_all[2], ate_ctrl[2], ate_emot[2]), 4),
+  Boot_SE = round(c(sd(boot_ate_phys), sd(boot_ate_ctrl), sd(boot_ate_emot)), 4),
+  Boot_CI_lower = round(c(
+    quantile(boot_ate_phys, 0.025),
+    quantile(boot_ate_ctrl, 0.025),
+    quantile(boot_ate_emot, 0.025)), 4),
+  Boot_CI_upper = round(c(
+    quantile(boot_ate_phys, 0.975),
+    quantile(boot_ate_ctrl, 0.975),
+    quantile(boot_ate_emot, 0.975)), 4)
+)
+
+knitr::kable(boot_table,
+             col.names = c("Outcome", "Point ATE", "Asymptotic SE", "Bootstrap SE",
+                           "Boot 2.5%", "Boot 97.5%"),
+             caption = "Bootstrap vs Asymptotic ATE Inference (B = 200)")
+```
+
+```{r bootstrap-plots, fig.width=10, fig.height=4}
+par(mfrow = c(1, 3))
+
+hist(boot_ate_phys, breaks = 30, main = "Bootstrap ATEs: Physical/Sexual",
+     xlab = "ATE", col = "steelblue", border = "white")
+abline(v = ate_all[1], col = "red", lwd = 2)
+abline(v = 0, col = "blue", lty = 3)
+
+hist(boot_ate_ctrl, breaks = 30, main = "Bootstrap ATEs: Controlling",
+     xlab = "ATE", col = "steelblue", border = "white")
+abline(v = ate_ctrl[1], col = "red", lwd = 2)
+abline(v = 0, col = "blue", lty = 3)
+
+hist(boot_ate_emot, breaks = 30, main = "Bootstrap ATEs: Emotional",
+     xlab = "ATE", col = "steelblue", border = "white")
+abline(v = ate_emot[1], col = "red", lwd = 2)
+abline(v = 0, col = "blue", lty = 3)
+
+par(mfrow = c(1, 1))
+```
+
+If the bootstrap SEs are similar to the asymptotic SEs, this confirms that the asymptotic theory works well in this sample. If the bootstrap CIs are wider, it suggests the asymptotic SEs may be too optimistic. The red line shows the point estimate and the blue dashed line marks zero — if the bulk of the bootstrap distribution falls to one side of zero, the treatment effect is robust.
+
+---
+
+# Summary & Methodological Notes
+
+## Athey/Wager Two-Step Pipeline
+
+This analysis follows the recommended pipeline from Athey & Wager:
+
+1. **Step 1 — Propensity Forest:** Confirms randomization by showing no covariate strongly predicts treatment assignment. Generates W.hat for orthogonalization.
+
+2. **Step 2 — Outcome Regression Forests:** Identifies which covariates are strong predictors of each IPV outcome. Generates Y.hat for orthogonalization and selects variables above the 0.2 × mean importance threshold.
+
+3. **Step 3 — Refined Causal Forests:** Uses selected covariates plus W.hat and Y.hat for orthogonalization, improving the signal-to-noise ratio for treatment effect heterogeneity detection.
+
+## Three Specifications
+
+| Specification | Description | Covariates Excluded |
+|---|---|---|
+| A | Full covariates | None |
+| B | Policy-relevant (keep baseline same outcome) | Cross-outcome baseline IPV |
+| C | Purely observable targeting | All baseline IPV (bl_physical, bl_emotional, bl_control) |
+
+Specification C represents the most policy-realistic scenario: policymakers only have access to observable demographic and socioeconomic characteristics for targeting, with no confidential IPV survey data at all.
+
+## Key Findings
+
+- Married women seem to benefit less than women in informal unions — possibly reflecting differences in bargaining dynamics within relationships.
+
+- Indigenous women tend to benefit more, especially for controlling behaviors — a potentially important finding for targeting.
+
+- Having more young children (0-5) dampens the treatment effect across multiple outcomes.
+
+- Province effects (Carchi vs Sucumbíos) may moderate treatment effectiveness.
+
+## Robustness Summary
+
+Five robustness checks were conducted:
+
+1. **Overlap check (5.1):** Propensity scores should be tightly clustered for both groups, confirming the RCT design and validating the use of W.hat orthogonalization.
+
+2. **Placebo test (5.2):** Shuffling treatment labels should collapse ATEs and CATEs to near zero with no significant calibration, confirming results are not artefacts.
+
+3. **Full vs selected covariates (5.3):** Comparing the refined pipeline against a baseline forest with all covariates. Similar ATEs increase confidence; better calibration from the refined pipeline validates the two-step approach.
+
+4. **Threshold sensitivity (5.4):** ATE stability across selection thresholds (0.1×, 0.2×, 0.5×) confirms results are not driven by an arbitrary variable selection cutoff.
+
+5. **Bootstrap CIs (5.5):** 200-replicate bootstrap provides non-parametric confidence intervals for comparison against asymptotic SEs.
+
+
+
+
+
+
+
+
+
+
+
+
