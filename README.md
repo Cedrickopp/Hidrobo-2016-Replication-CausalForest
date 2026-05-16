@@ -109,3 +109,11 @@ install.packages(c("grf", "haven", "dplyr", "ggplot2", "corrplot",
 ```
 
 Knit `Hidrobo2016_Replication_CausalForest.Rmd` in RStudio. Note that the bootstrap (B = 200) and 5-fold CV across nine causal forests per fold make full rendering computationally intensive; expect roughly 20–40 minutes depending on hardware.
+
+---
+
+## Licence
+
+The code and analysis in this repository (`.Rmd`, README) are released under the [MIT Licence](LICENSE).
+
+The underlying data (`DV_baseline_followup.dta`) are **not** covered by this licence. They are the property of the original authors and are distributed via the Harvard Dataverse under their own terms. Please refer to the Dataverse entry linked in the Data section above before using or redistributing the data.
