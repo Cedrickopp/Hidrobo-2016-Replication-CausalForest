@@ -8,7 +8,7 @@
 
 ## Original Paper
 
-Hidrobo, M., Peterman, A., & Heise, L. (2016). The Effect of Cash, Vouchers, and Food Transfers on Intimate Partner Violence: Evidence from a Randomized Experiment in Northern Ecuador. *American Economic Journal: Applied Economics*, 8(3), 284–303. https://doi.org/10.1257/app.20150082
+Hidrobo, M., Peterman, A., & Heise, L. (2016). The Effect of Cash, Vouchers, and Food Transfers on Intimate Partner Violence: Evidence from a Randomized Experiment in Northern Ecuador. *American Economic Journal: Applied Economics*, 8(3), 284–303. https://doi.org/10.1257/app.20150048
 
 The paper evaluates a randomized controlled trial (RCT) conducted in northern Ecuador in which households were assigned to receive cash, food, or voucher transfers — or to a control group. The main finding is that all three transfer modalities significantly reduce intimate partner violence (IPV), with the largest reductions in controlling and emotional violence. The original analysis uses probit regressions with clustered standard errors, estimated in Stata.
 
@@ -16,8 +16,8 @@ The paper evaluates a randomized controlled trial (RCT) conducted in northern Ec
 
 ## Data
 
-The replication data are available from the Harvard Dataverse:
-https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/YBGPAP
+The replication data are available from the AEA's OpenICPSR repository:
+https://www.openicpsr.org/openicpsr/project/113634/version/V1/view
 
 To reproduce the analysis, download `DV_baseline_followup.dta` and place it at:
 ```

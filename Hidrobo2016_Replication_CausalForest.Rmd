@@ -32,8 +32,7 @@ library(tidyr)
 ## Load Data
 
 ```{r load-data}
-# Data: Hidrobo et al. (2016) replication archive, Harvard Dataverse
-# https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/YBGPAP
+# Data: Hidrobo et al. (2016) — https://www.openicpsr.org/openicpsr/project/113634/version/V1/view
 # Place DV_baseline_followup.dta at Data-and-dofiles/Data/ relative to this file.
 df_raw <- read_dta("Data-and-dofiles/Data/DV_baseline_followup.dta")
 dim(df_raw)
